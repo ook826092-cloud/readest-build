@@ -1,0 +1,103 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract source code
+        run: |
+          mkdir -p source
+          tar xzf readest-build-ready.tar.gz -C source
+          # Move files to repo root (preserve .github)
+          cp -r source/.github .github 2>/dev/null || true
+          # Move everything else
+          for item in source/*; do
+            if [ "$(basename "$item")" != ".github" ]; then
+              cp -r "$item" ./
+            fi
+          done
+          rm -rf source readest-build-ready.tar.gz
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: apps/readest-app/src-tauri -> target
+
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: sdkmanager --install "ndk;28.0.13004108"
+
+      - name: Install pnpm dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Setup vendor assets
+        working-directory: apps/readest-app
+        run: |
+          mkdir -p packages/foliate-js/node_modules
+          cd packages/foliate-js/node_modules
+          npm pack pdfjs-dist@4.9.155
+          tar xzf pdfjs-dist-4.9.155.tgz
+          mv package pdfjs-dist
+          rm pdfjs-dist-4.9.155.tgz
+          mkdir -p ../../../../packages/foliate-js/vendor/pdfjs
+          touch ../../../../packages/foliate-js/vendor/pdfjs/annotation_layer_builder.css
+          touch ../../../../packages/foliate-js/vendor/pdfjs/text_layer_builder.css
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+
+      - name: Setup vendors
+        working-directory: apps/readest-app
+        run: pnpm setup-vendors
+
+      - name: Build Next.js frontend
+        working-directory: apps/readest-app
+        run: pnpm build
+        env:
+          NODE_OPTIONS: '--max-old-space-size=4096'
+
+      - name: Build Android APK
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/28.0.13004108
+        with:
+          projectPath: apps/readest-app
+          tauriScript: pnpm tauri
+          args: --target aarch64
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: readest-android-apk
+          path: apps/readest-app/src-tauri/gen/android/app/build/outputs/apk/universal/release/*.apk
+          if-no-files-found: error
